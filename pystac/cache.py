@@ -21,7 +21,8 @@ class ResolvedObjectCache:
     Args:
         ids_to_objects (Dict[str, STACObject]): Existing cache of STACObject IDs mapped
         to the cached STACObject.
-        TODO
+        ids_to_hrefs (Dict[str, str]): Cache of STACObject IDs to their HREFs.
+        hrefs_to_ids
     """
     def __init__(self, ids_to_objects=None, ids_to_hrefs=None, hrefs_to_ids=None):
         self.ids_to_objects = ids_to_objects or {}
@@ -144,7 +145,7 @@ class ResolvedObjectCache:
 
         Args:
             first (ResolvedObjectCache): The first cache to merge. This cache will be
-                the prefered cache for objects in the case of ID conflicts.
+                the preferred cache for objects in the case of ID conflicts.
             second (ResolvedObjectCache): The second cache to merge.
 
         Returns:

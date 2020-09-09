@@ -2,8 +2,9 @@ import os
 from datetime import datetime
 import csv
 
-from pystac import (Catalog, Item, Asset, LabelItem, LabelCount, LabelOverview, LabelClasses,
-                    Extent, TemporalExtent, SpatialExtent, MediaType)
+from pystac import (Catalog, Item, Asset, Extent, TemporalExtent, SpatialExtent, MediaType,
+                    Extensions)
+from pystac.extensions.label import (LabelOverview, LabelClasses, LabelCount)
 
 TEST_LABEL_CATALOG = {
     'country-1': {
@@ -71,12 +72,19 @@ class TestCases:
                 if row[4]:
                     custom_extensions = row[4].split('|')
 
+                valid = True
+                if len(row) > 5:
+                    # The 5th column will be "INVALID" if the example
+                    # shouldn't pass validation
+                    valid = row[5] != 'INVALID'
+
                 examples.append({
                     'path': path,
                     'object_type': object_type,
                     'stac_version': stac_version,
                     'common_extensions': common_extensions,
-                    'custom_extensions': custom_extensions
+                    'custom_extensions': custom_extensions,
+                    'valid': valid
                 })
         return examples
 
@@ -87,7 +95,8 @@ class TestCases:
             TestCases.test_case_2(),
             TestCases.test_case_3(),
             TestCases.test_case_4(),
-            TestCases.test_case_5()
+            TestCases.test_case_5(),
+            TestCases.test_case_7()
         ]
 
     @staticmethod
@@ -110,21 +119,28 @@ class TestCases:
 
         image_item.add_asset('ortho', Asset(href='some/geotiff.tiff', media_type=MediaType.GEOTIFF))
 
-        overviews = [LabelOverview('label', counts=[LabelCount('one', 1), LabelCount('two', 2)])]
+        overviews = [
+            LabelOverview.create('label',
+                                 counts=[LabelCount.create('one', 1),
+                                         LabelCount.create('two', 2)])
+        ]
 
-        label_item = LabelItem(id='label-items',
-                               geometry=RANDOM_GEOM,
-                               bbox=RANDOM_BBOX,
-                               datetime=datetime.utcnow(),
-                               properties={},
-                               label_description='ML Labels',
-                               label_type='vector',
-                               label_properties=['label'],
-                               label_classes=[LabelClasses(classes=['one', 'two'], name='label')],
-                               label_tasks=['classification'],
-                               label_methods=['manual'],
-                               label_overviews=overviews)
-        label_item.add_source(image_item, assets=['ortho'])
+        label_item = Item(id='label-items',
+                          geometry=RANDOM_GEOM,
+                          bbox=RANDOM_BBOX,
+                          datetime=datetime.utcnow(),
+                          properties={})
+
+        label_item.ext.enable(Extensions.LABEL)
+        label_item.ext.label.apply(
+            label_description='ML Labels',
+            label_type='vector',
+            label_properties=['label'],
+            label_classes=[LabelClasses.create(classes=['one', 'two'], name='label')],
+            label_tasks=['classification'],
+            label_methods=['manual'],
+            label_overviews=overviews)
+        label_item.ext.label.add_source(image_item, assets=['ortho'])
 
         root_cat.add_item(image_item)
         root_cat.add_item(label_item)
@@ -143,3 +159,15 @@ class TestCases:
     def test_case_5():
         """Based on a subset of https://cbers.stac.cloud/"""
         return Catalog.from_file(TestCases.get_path('data-files/catalogs/test-case-5/catalog.json'))
+
+    @staticmethod
+    def test_case_6():
+        """Based on a subset of CBERS, contains a root and 4 empty children"""
+        return Catalog.from_file(
+            TestCases.get_path('data-files/catalogs/cbers-partial/catalog.json'))
+
+    @staticmethod
+    def test_case_7():
+        """Test case 4 as STAC version 0.8.1"""
+        return Catalog.from_file(
+            TestCases.get_path('data-files/catalogs/label_catalog_0_8_1/catalog.json'))

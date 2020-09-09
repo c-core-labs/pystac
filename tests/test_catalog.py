@@ -1,11 +1,14 @@
 import os
+import json
 import unittest
 from tempfile import TemporaryDirectory
 from datetime import datetime
 from collections import defaultdict
 
-from pystac import (Catalog, Collection, CatalogType, STAC_VERSION, LinkType, Item, Asset,
-                    LabelItem, LabelClasses, MediaType)
+import pystac
+from pystac import (Catalog, Collection, CatalogType, LinkType, Item, Asset, MediaType, Extensions)
+from pystac.extensions.label import LabelClasses
+from pystac.validation import STACValidationError
 from pystac.utils import is_absolute_href
 from tests.utils import (TestCases, RANDOM_GEOM, RANDOM_BBOX, MockStacIO)
 
@@ -28,9 +31,10 @@ class CatalogTest(unittest.TestCase):
             self.assertEqual(len(list(items)), 8)
 
     def test_read_remote(self):
-        catalog_url = ('https://raw.githubusercontent.com/radiantearth/stac-spec/'
-                       'v{}'
-                       '/extensions/label/examples/multidataset/catalog.json'.format(STAC_VERSION))
+        # TODO: Move this URL to the main stac-spec repo once the example JSON is fixed.
+        catalog_url = (
+            'https://raw.githubusercontent.com/lossyrob/stac-spec/0.9.0/pystac-upgrade-fixes'
+            '/extensions/label/examples/multidataset/catalog.json')
         cat = Catalog.from_file(catalog_url)
 
         zanzibar = cat.get_child('zanzibar-collection')
@@ -244,19 +248,21 @@ class CatalogTest(unittest.TestCase):
             # same location as the image
             img_href = item.assets['ortho'].href
             label_href = '{}.geojson'.format(os.path.splitext(img_href)[0])
-            label_item = LabelItem(
-                id='Labels',
-                geometry=item.geometry,
-                bbox=item.bbox,
-                datetime=datetime.utcnow(),
-                properties={},
+            label_item = Item(id='Labels',
+                              geometry=item.geometry,
+                              bbox=item.bbox,
+                              datetime=datetime.utcnow(),
+                              properties={})
+            label_item.ext.enable(Extensions.LABEL)
+            label_ext = label_item.ext.label
+            label_ext.apply(
                 label_description='labels',
                 label_type='vector',
-                label_properties='label',
-                label_classes=[LabelClasses(classes=['one', 'two'], name='label')],
+                label_properties=['label'],
+                label_classes=[LabelClasses.create(classes=['one', 'two'], name='label')],
                 label_tasks=['classification'])
-            label_item.add_source(item, assets=['ortho'])
-            label_item.add_geojson_labels(label_href)
+            label_ext.add_source(item, assets=['ortho'])
+            label_ext.add_geojson_labels(label_href)
 
             return [item, label_item]
 
@@ -385,26 +391,25 @@ class CatalogTest(unittest.TestCase):
     def test_make_all_links_relative_or_absolute(self):
         def check_all_relative(cat):
             for root, catalogs, items in cat.walk():
-                for l in root.links:
-                    if l.rel != 'self':
-                        # print(l.rel)
-                        self.assertTrue(l.link_type == LinkType.RELATIVE)
-                        self.assertFalse(is_absolute_href(l.get_href()))
-                for i in items:
-                    for l in i.links:
-                        if l.rel != 'self':
-                            self.assertTrue(l.link_type == LinkType.RELATIVE)
-                            self.assertFalse(is_absolute_href(l.get_href()))
+                for link in root.links:
+                    if link.rel != 'self':
+                        self.assertTrue(link.link_type == LinkType.RELATIVE)
+                        self.assertFalse(is_absolute_href(link.get_href()))
+                for item in items:
+                    for link in item.links:
+                        if link.rel != 'self':
+                            self.assertTrue(link.link_type == LinkType.RELATIVE)
+                            self.assertFalse(is_absolute_href(link.get_href()))
 
         def check_all_absolute(cat):
             for root, catalogs, items in cat.walk():
-                for l in root.links:
-                    self.assertTrue(l.link_type == LinkType.ABSOLUTE)
-                    self.assertTrue(is_absolute_href(l.get_href()))
-                for i in items:
-                    for l in i.links:
-                        self.assertTrue(l.link_type == LinkType.ABSOLUTE)
-                        self.assertTrue(is_absolute_href(l.get_href()))
+                for link in root.links:
+                    self.assertTrue(link.link_type == LinkType.ABSOLUTE)
+                    self.assertTrue(is_absolute_href(link.get_href()))
+                for item in items:
+                    for link in item.links:
+                        self.assertTrue(link.link_type == LinkType.ABSOLUTE)
+                        self.assertTrue(is_absolute_href(link.get_href()))
 
         test_cases = TestCases.all_test_catalogs()
 
@@ -416,6 +421,44 @@ class CatalogTest(unittest.TestCase):
                 check_all_relative(c2)
                 c2.make_all_links_absolute()
                 check_all_absolute(c2)
+
+    def test_extra_fields(self):
+        catalog = TestCases.test_case_1()
+
+        catalog.extra_fields['type'] = 'FeatureCollection'
+
+        with TemporaryDirectory() as tmp_dir:
+            p = os.path.join(tmp_dir, 'catalog.json')
+            catalog.save_object(include_self_link=False, dest_href=p)
+            with open(p) as f:
+                cat_json = json.load(f)
+            self.assertTrue('type' in cat_json)
+            self.assertEqual(cat_json['type'], 'FeatureCollection')
+
+            read_cat = pystac.read_file(p)
+            self.assertTrue('type' in read_cat.extra_fields)
+            self.assertEqual(read_cat.extra_fields['type'], 'FeatureCollection')
+
+    def test_validate_all(self):
+        for cat in TestCases.all_test_catalogs():
+            with self.subTest(cat.id):
+                # If hrefs are not set, it will fail validation.
+                if cat.get_self_href() is None:
+                    cat.normalize_hrefs('/tmp')
+                cat.validate_all()
+
+        # Make one invalid, write it off, read it in, ensure it throws
+        cat = TestCases.test_case_1()
+        item = cat.get_item('area-1-1-labels', recursive=True)
+        item.geometry = {'type': 'INVALID', 'coordinates': 'NONE'}
+        with TemporaryDirectory() as tmp_dir:
+            cat.normalize_hrefs(tmp_dir)
+            cat.save(catalog_type=pystac.CatalogType.SELF_CONTAINED)
+
+            cat2 = pystac.read_file(os.path.join(tmp_dir, 'catalog.json'))
+
+            with self.assertRaises(STACValidationError):
+                cat2.validate_all()
 
     def test_set_hrefs_manually(self):
         catalog = TestCases.test_case_1()
@@ -486,25 +529,51 @@ class CatalogTest(unittest.TestCase):
                         calls, 1,
                         '{} was read {} times instead of once!'.format(collection_uri, calls))
 
+    def test_reading_iterating_and_writing_works_as_expected(self):
+        """ Test case to cover issue #88 """
+        stac_uri = 'tests/data-files/catalogs/test-case-6/catalog.json'
+        cat = Catalog.from_file(stac_uri)
+
+        # Iterate over the items. This was causing failure in
+        # in the later iterations as per issue #88
+        for item in cat.get_all_items():
+            pass
+
+        with TemporaryDirectory() as tmp_dir:
+            new_stac_uri = os.path.join(tmp_dir, 'test-case-6')
+            cat.normalize_hrefs(new_stac_uri)
+            cat.save(catalog_type=CatalogType.SELF_CONTAINED)
+
+            # Open the local copy and iterate over it.
+            cat2 = Catalog.from_file(os.path.join(new_stac_uri, 'catalog.json'))
+
+            for item in cat2.get_all_items():
+                # Iterate again over the items. This would fail in #88
+                pass
+
+    def test_get_children_cbers(self):
+        cat = TestCases.test_case_6()
+        self.assertEqual(len(list(cat.get_children())), 4)
+
 
 class FullCopyTest(unittest.TestCase):
-    def check_link(self, l, tag):
-        if l.is_resolved():
-            target_href = l.target.get_self_href()
+    def check_link(self, link, tag):
+        if link.is_resolved():
+            target_href = link.target.get_self_href()
         else:
-            target_href = l.target
+            target_href = link.target
         self.assertTrue(tag in target_href,
-                        '[{}] {} does not contain "{}"'.format(l.rel, target_href, tag))
+                        '[{}] {} does not contain "{}"'.format(link.rel, target_href, tag))
 
-    def check_item(self, i, tag):
-        for l in i.links:
-            self.check_link(l, tag)
+    def check_item(self, item, tag):
+        for link in item.links:
+            self.check_link(link, tag)
 
     def check_catalog(self, c, tag):
         self.assertEqual(len(c.get_links('root')), 1)
 
-        for l in c.links:
-            self.check_link(l, tag)
+        for link in c.links:
+            self.check_link(link, tag)
 
         for child in c.get_children():
             self.check_catalog(child, tag)
@@ -543,18 +612,20 @@ class FullCopyTest(unittest.TestCase):
                 image_item.add_asset(
                     key, Asset(href='some/{}.tif'.format(key), media_type=MediaType.GEOTIFF))
 
-            label_item = LabelItem(
-                id='Labels',
-                geometry=RANDOM_GEOM,
-                bbox=RANDOM_BBOX,
-                datetime=datetime.utcnow(),
-                properties={},
+            label_item = Item(id='Labels',
+                              geometry=RANDOM_GEOM,
+                              bbox=RANDOM_BBOX,
+                              datetime=datetime.utcnow(),
+                              properties={},
+                              stac_extensions=[Extensions.LABEL])
+            label_ext = label_item.ext.label
+            label_ext.apply(
                 label_description='labels',
                 label_type='vector',
-                label_properties='label',
-                label_classes=[LabelClasses(classes=['one', 'two'], name='label')],
+                label_properties=['label'],
+                label_classes=[LabelClasses.create(classes=['one', 'two'], name='label')],
                 label_tasks=['classification'])
-            label_item.add_source(image_item, assets=['ortho'])
+            label_ext.add_source(image_item, assets=['ortho'])
 
             cat.add_items([image_item, label_item])
 
